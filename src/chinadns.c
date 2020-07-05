@@ -74,6 +74,7 @@ static char compression_buf[BUF_SIZE];
 static int verbose = 0;
 static int compression = 0;
 static int bidirectional = 0;
+static int use_domain_filter = 0;
 
 static const char *default_dns_servers =
 "114.114.114.114,223.5.5.5,8.8.8.8,8.8.4.4,208.67.222.222:443,208.67.222.222:5353";
@@ -86,6 +87,9 @@ static int parse_args(int argc, char **argv);
 
 static int setnonblock(int sock);
 static int resolve_dns_servers();
+static const char *get_domain(const char* hostname);
+static int not_cn_domain(const char* hostname);
+static int not_w_domain(const char* hostname);
 
 static const char *default_listen_addr = "0.0.0.0";
 static const char *default_listen_port = "53";
@@ -94,8 +98,14 @@ static char *listen_addr = NULL;
 static char *listen_port = NULL;
 
 static char *ip_list_file = NULL;
+static char *domain_file = NULL;
+static char *outdomain_file = NULL;
+
 static ip_list_t ip_list;
 static int parse_ip_list();
+static int parse_domain_file(const char*,char**);
+static char *domains_list = NULL;
+static char *outdomains_list = NULL;
 
 static char *chnroute_file = NULL;
 static net_list_t chnroute_list;
@@ -185,6 +195,10 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   if (0 != parse_chnroute())
     return EXIT_FAILURE;
+  if (0 != parse_domain_file(domain_file, &domains_list))
+    return EXIT_FAILURE;
+  if (0 != parse_domain_file(outdomain_file, &outdomains_list))
+    return EXIT_FAILURE;
   if (0 != resolve_dns_servers())
     return EXIT_FAILURE;
   if (0 != dns_init_sockets())
@@ -241,7 +255,7 @@ static int setnonblock(int sock) {
 
 static int parse_args(int argc, char **argv) {
   int ch;
-  while ((ch = getopt(argc, argv, "hb:p:s:l:c:y:dmvV")) != -1) {
+  while ((ch = getopt(argc, argv, "hb:p:s:l:i:o:c:y:dmvV")) != -1) {
     switch (ch) {
       case 'h':
         usage();
@@ -260,6 +274,14 @@ static int parse_args(int argc, char **argv) {
         break;
       case 'l':
         ip_list_file = strdup(optarg);
+        break;
+      case 'i':
+        domain_file = strdup(optarg);
+        use_domain_filter = 1;
+        break;
+      case 'o':
+        outdomain_file = strdup(optarg);
+        use_domain_filter = 1;
         break;
       case 'y':
         empty_result_delay = atof(optarg);
@@ -336,7 +358,7 @@ static int resolve_dns_servers() {
       VERR("%s:%s\n", gai_strerror(r), token);
       return -1;
     }
-    if (compression) {
+    if (compression || use_domain_filter) {
       if (test_ip_in_list(((struct sockaddr_in *)addr_ip->ai_addr)->sin_addr,
                           &chnroute_list)) {
         dns_server_addrs[has_chn_dns].addr = addr_ip->ai_addr;
@@ -427,6 +449,40 @@ static int parse_ip_list() {
   }
 
   qsort(ip_list.ips, ip_list.entries, sizeof(struct in_addr), cmp_in_addr);
+  fclose(fp);
+  return 0;
+}
+
+static int parse_domain_file(const char* filename, char** plist) {
+  FILE *fp;
+  int size = 0;
+  int ret;
+
+  if (domain_file == NULL)
+    return 0;
+
+  if (chnroute_file == NULL) {
+    ERR("no chnroute");
+    VERR("Domain filter needs ChnRoute file.\n");
+    return -1;
+  }
+
+  fp = fopen(filename, "r");
+  if (fp == NULL) {
+    ERR("fopen domain");
+    VERR("Can't open domain file: %s\n", domain_file);
+    return -1;
+  }
+
+  fseek(fp, 0L, SEEK_END);
+  size = ftell(fp);
+  *plist = malloc(size + 1);
+  (*plist)[size] = 0;
+  rewind(fp);
+
+  ret = fread(*plist, size, 1, fp);
+
+  LOG("domain list: %s(%d)\n",*plist,ret);
   fclose(fp);
   return 0;
 }
@@ -639,17 +695,74 @@ static void dns_handle_local() {
       }
     }
     if (!sended) {
-      for (i = 0; i < dns_servers_len; i++) {
-        if (-1 == sendto(remote_sock, global_buf, len, 0,
-                         dns_server_addrs[i].addr,
-                         dns_server_addrs[i].addrlen))
-          ERR("sendto");
+      LOG("---- local sock\n");
+      if (not_w_domain(question_hostname)) {
+        for (i = 0; i < has_chn_dns; i++) {
+	    if (-1 == sendto(remote_sock, global_buf, len, 0,
+			     dns_server_addrs[i].addr,
+			     dns_server_addrs[i].addrlen))
+	      ERR("sendto");
+        }
+      }
+      if (not_cn_domain(question_hostname)) {
+         for (i =  has_chn_dns; i < dns_servers_len; i++) {
+	    if (-1 == sendto(remote_sock, global_buf, len, 0,
+			     dns_server_addrs[i].addr,
+			     dns_server_addrs[i].addrlen))
+	      ERR("sendto");
+         }
       }
     }
   }
   else
     ERR("recvfrom");
 }
+
+
+static const char *get_domain(const char* hostname) {
+  const char* p = strrchr(hostname, '.');
+  if (p) {
+     while (p > hostname) {
+       p--;
+       if ( (*p) == '.') {
+          p++;
+          break;
+       }
+     }
+  } 
+
+  return p;
+}
+ 
+static int not_cn_domain(const char* hostname) {
+  if (!domains_list)
+     return 1;
+
+  const char* p = get_domain(hostname);
+  if (!p)
+     return 0;
+
+  LOG("cn domain:%s, %s\n",p,hostname);
+  if (strstr(domains_list, p))
+     return 0;
+ 
+  return 1;
+} 
+
+static int not_w_domain(const char* hostname) {
+  if (!outdomains_list)
+     return 1;
+
+  const char* p = get_domain(hostname);
+  if (!p)
+     return 0;
+
+  LOG("w domain:%s, %s\n",p,hostname);
+  if (strstr(outdomains_list, p))
+     return 0;
+ 
+  return 1;
+} 
 
 static void dns_handle_remote() {
   struct sockaddr *src_addr = malloc(sizeof(struct sockaddr));
@@ -898,6 +1011,8 @@ usage: chinadns [-h] [-l IPLIST_FILE] [-b BIND_ADDR] [-p BIND_PORT]\n\
 Forward DNS requests.\n\
 \n\
   -l IPLIST_FILE        path to ip blacklist file\n\
+  -i DOMAIN_FILE        path to domain name file which need to ignore foreign dns \n\
+  -o OUTDOMAIN_FILE     path to domain name file which need to ignore chinses dns \n\
   -c CHNROUTE_FILE      path to china route file\n\
                         if not specified, CHNRoute will be turned\n\
   -d                    off enable bi-directional CHNRoute filter\n\
