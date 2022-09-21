@@ -80,7 +80,7 @@ static const char *default_dns_servers =
 "114.114.114.114,223.5.5.5,8.8.8.8,8.8.4.4,208.67.222.222:443,208.67.222.222:5353";
 static char *dns_servers = NULL;
 static int dns_servers_len;
-static int has_chn_dns;
+static int has_chn_dns;                   // cn dns server count
 static id_addr_t *dns_server_addrs;
 
 static int parse_args(int argc, char **argv);
@@ -696,20 +696,25 @@ static void dns_handle_local() {
     }
     if (!sended) {
       LOG("---- local sock\n");
-      if (not_w_domain(question_hostname)) {
+      int is_world = 0;   // default handle as cn domain
+      if (not_w_domain(question_hostname) == 0)     // in outdomains
+          is_world = 1;
+      if (not_cn_domain(question_hostname) == 0)    // in domains
+          is_world = 0;
+      if (is_world == 0) {
         for (i = 0; i < has_chn_dns; i++) {
-	    if (-1 == sendto(remote_sock, global_buf, len, 0,
-			     dns_server_addrs[i].addr,
-			     dns_server_addrs[i].addrlen))
-	      ERR("sendto");
+	        if (-1 == sendto(remote_sock, global_buf, len, 0,
+			      dns_server_addrs[i].addr,
+			      dns_server_addrs[i].addrlen))
+	            ERR("sendto");
         }
       }
-      if (not_cn_domain(question_hostname)) {
+      else {
          for (i =  has_chn_dns; i < dns_servers_len; i++) {
-	    if (-1 == sendto(remote_sock, global_buf, len, 0,
-			     dns_server_addrs[i].addr,
-			     dns_server_addrs[i].addrlen))
-	      ERR("sendto");
+	          if (-1 == sendto(remote_sock, global_buf, len, 0,
+			          dns_server_addrs[i].addr,
+			          dns_server_addrs[i].addrlen))
+	            ERR("sendto");
          }
       }
     }
@@ -734,13 +739,15 @@ static const char *get_domain(const char* hostname) {
   return p;
 }
  
+ // is a doman && exist in list, return 0
+ // others return 1
 static int not_cn_domain(const char* hostname) {
   if (!domains_list)
      return 1;
 
   const char* p = get_domain(hostname);
   if (!p)
-     return 0;
+     return 1;
 
   LOG("cn domain:%s, %s\n",p,hostname);
   if (strstr(domains_list, p))
@@ -749,13 +756,15 @@ static int not_cn_domain(const char* hostname) {
   return 1;
 } 
 
+// hostname is a world domain, returns 0
+// others returns 1
 static int not_w_domain(const char* hostname) {
   if (!outdomains_list)
      return 1;
 
   const char* p = get_domain(hostname);
   if (!p)
-     return 0;
+     return 1;
 
   LOG("w domain:%s, %s\n",p,hostname);
   if (strstr(outdomains_list, p))
@@ -1014,8 +1023,8 @@ Forward DNS requests.\n\
   -i DOMAIN_FILE        path to domain name file which need to ignore foreign dns \n\
   -o OUTDOMAIN_FILE     path to domain name file which need to ignore chinses dns \n\
   -c CHNROUTE_FILE      path to china route file\n\
-                        if not specified, CHNRoute will be turned\n\
-  -d                    off enable bi-directional CHNRoute filter\n\
+                        if not specified, CHNRoute will be turned off\n\
+  -d                    enable bi-directional CHNRoute filter\n\
   -y                    delay time for suspects, default: 0.3\n\
   -b BIND_ADDR          address that listens, default: 0.0.0.0\n\
   -p BIND_PORT          port that listens, default: 53\n\
