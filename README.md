@@ -118,12 +118,15 @@ add a redirect rule for TCP:
 Advanced
 --------
 
-    usage: chinadns [-h] [-l IPLIST_FILE] [-b BIND_ADDR] [-p BIND_PORT]
-           [-c CHNROUTE_FILE] [-s DNS] [-v]
+    usage: chinadns [-h] [-l IPLIST_FILE] [-i DOMAIN_FILE] [-o OUTDOMAIN_FILE]
+           [-b BIND_ADDR] [-p BIND_PORT] [-c CHNROUTE_FILE] [-s DNS] [-v]
     Forward DNS requests.
 
     -h, --help            show this help message and exit
     -l IPLIST_FILE        path to ip blacklist file
+    -i DOMAIN_FILE        domains (and subdomains) resolved by chinese dns only
+    -o OUTDOMAIN_FILE     domains (and subdomains) resolved by foreign dns only
+                          other domains query all dns, needs -c
     -c CHNROUTE_FILE      path to china route file
                           if not specified, CHNRoute will be turned off
     -d                    enable bi-directional CHNRoute filter
@@ -142,6 +145,31 @@ About chnroute
 You can generate latest chnroute.txt using this command:
 
     curl 'http://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest' | grep ipv4 | grep CN | awk -F\| '{ printf("%s/%d\n", $4, 32-log($5)/log(2)) }' > chnroute.txt
+
+About domain lists
+------------------
+
+`-i` and `-o` let you pin specific domains to one group of upstream servers.
+Each DNS server given with `-s` is classified as Chinese or foreign by
+checking its IP against the chnroute file, so `-c` is required.
+
+| Domain                      | Queried                      | Response filtering        |
+|-----------------------------|------------------------------|---------------------------|
+| In `-i` file (or subdomain) | Chinese DNS servers only     | none, answers pass as-is  |
+| In `-o` file (or subdomain) | Foreign DNS servers only     | only the `-l` IP blacklist |
+| In neither                  | All DNS servers              | normal ChinaDNS filtering |
+
+A domain that appears in both files is treated as Chinese. If the chosen
+group has no servers, the query goes to all servers instead.
+
+Each file has one domain per line; an entry also matches all of its
+subdomains, so `qq.com` covers `www.qq.com` but not `myqq.com`. Matching is
+case-insensitive and CRLF line endings are fine. Samples are in
+`src/domains.txt` and `src/outdomains.txt`:
+
+    src/chinadns -c chnroute.txt -l iplist.txt \
+        -i src/domains.txt -o src/outdomains.txt \
+        -s 114.114.114.114,8.8.8.8
 
 
 License
